@@ -60,10 +60,9 @@ socket.on('join_room', ({ roomCode, playerName, playerId, spectator }) => {
     socket.join(roomCode);
     socket.data.roomCode = roomCode;
 
-// Check if player is rejoining — also check host player ID
-    const resolvedPlayerId = playerId || (room.hostPlayerId);
-    const existingPlayer = resolvedPlayerId
-      ? room.players.find(p => p.id === resolvedPlayerId)
+// Check if player is rejoining using their stored player ID only
+    const existingPlayer = playerId
+      ? room.players.find(p => p.id === playerId)
       : null;
 
 if (existingPlayer) {
