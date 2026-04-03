@@ -32,8 +32,12 @@ io.on('connection', (socket) => {
   console.log(`Player connected: ${socket.id}`);
 
   // Host creates a new room
-  socket.on('create_room', ({ roomCode, players }) => {
-    rooms[roomCode] = { players, hostId: socket.id };
+socket.on('create_room', ({ roomCode, players }) => {
+    rooms[roomCode] = {
+      players,
+      hostId: socket.id,
+      hostPlayerId: players[0].id,
+    };
     socket.join(roomCode);
     socket.emit('room_created', { roomCode, players });
     console.log(`Room created: ${roomCode}`);
@@ -56,9 +60,10 @@ socket.on('join_room', ({ roomCode, playerName, playerId, spectator }) => {
     socket.join(roomCode);
     socket.data.roomCode = roomCode;
 
-    // Check if player is rejoining
-    const existingPlayer = playerId
-      ? room.players.find(p => p.id === playerId)
+// Check if player is rejoining — also check host player ID
+    const resolvedPlayerId = playerId || (room.hostPlayerId);
+    const existingPlayer = resolvedPlayerId
+      ? room.players.find(p => p.id === resolvedPlayerId)
       : null;
 
 if (existingPlayer) {
