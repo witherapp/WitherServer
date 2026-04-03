@@ -61,18 +61,19 @@ socket.on('join_room', ({ roomCode, playerName, playerId, spectator }) => {
       ? room.players.find(p => p.id === playerId)
       : null;
 
-    if (existingPlayer) {
-      // Rejoin — restore existing player
-      socket.data.playerId = existingPlayer.id;
-      socket.emit('joined_room', {
-        roomCode,
-        players: room.players,
-        playerId: existingPlayer.id,
-      });
-      io.to(roomCode).emit('players_updated', { players: room.players });
-      console.log(`${playerName} rejoined room ${roomCode}`);
-      return;
-    }
+if (existingPlayer) {
+  // Rejoin — restore existing player but update name if changed
+  existingPlayer.name = playerName;
+  socket.data.playerId = existingPlayer.id;
+  socket.emit('joined_room', {
+    roomCode,
+    players: room.players,
+    playerId: existingPlayer.id,
+  });
+  io.to(roomCode).emit('players_updated', { players: room.players });
+  console.log(`${playerName} rejoined room ${roomCode}`);
+  return;
+}
 
     // Spectator join
     if (spectator) {
@@ -145,6 +146,15 @@ socket.on('join_room', ({ roomCode, playerName, playerId, spectator }) => {
     room.players = room.players.filter(p => p.id !== playerId);
     io.to(roomCode).emit('players_updated', { players: room.players });
   });
+  // Player changes their name
+socket.on('update_name', ({ roomCode, playerId, newName }) => {
+  const room = rooms[roomCode];
+  if (!room) return;
+  room.players = room.players.map(p =>
+    p.id === playerId ? { ...p, name: newName } : p
+  );
+  io.to(roomCode).emit('players_updated', { players: room.players });
+});
 
   // Full game state sync
   socket.on('sync_state', ({ roomCode, players }) => {
