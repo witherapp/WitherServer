@@ -40,14 +40,10 @@ io.on('connection', (socket) => {
   });
 
   // Player joins existing room
-  socket.on('join_room', ({ roomCode, playerName }) => {
+socket.on('join_room', ({ roomCode, playerName, playerId, spectator }) => {
     const room = rooms[roomCode];
     if (!room) {
       socket.emit('join_error', { message: 'Room not found. Check your code.' });
-      return;
-    }
-    if (room.players.length >= 10) {
-      socket.emit('join_error', { message: 'Room is full.' });
       return;
     }
 
@@ -57,6 +53,39 @@ io.on('connection', (socket) => {
       '#ff6644', '#44ff88',
     ];
 
+    socket.join(roomCode);
+    socket.data.roomCode = roomCode;
+
+    // Check if player is rejoining
+    const existingPlayer = playerId
+      ? room.players.find(p => p.id === playerId)
+      : null;
+
+    if (existingPlayer) {
+      // Rejoin — restore existing player
+      socket.data.playerId = existingPlayer.id;
+      socket.emit('joined_room', {
+        roomCode,
+        players: room.players,
+        playerId: existingPlayer.id,
+      });
+      io.to(roomCode).emit('players_updated', { players: room.players });
+      console.log(`${playerName} rejoined room ${roomCode}`);
+      return;
+    }
+
+    // Spectator join
+    if (spectator) {
+      socket.emit('joined_room', { roomCode, players: room.players });
+      return;
+    }
+
+    // New player
+    if (room.players.filter(p => p.name !== 'Spectator').length >= 10) {
+      socket.emit('join_error', { message: 'Room is full.' });
+      return;
+    }
+
     const newPlayer = {
       id: Date.now(),
       name: playerName,
@@ -65,14 +94,13 @@ io.on('connection', (socket) => {
     };
 
     room.players.push(newPlayer);
-    socket.join(roomCode);
-    socket.data.roomCode = roomCode;
     socket.data.playerId = newPlayer.id;
 
-    // Send current state to joining player
-    socket.emit('joined_room', { roomCode, players: room.players });
-
-    // Tell everyone else a new player joined
+    socket.emit('joined_room', {
+      roomCode,
+      players: room.players,
+      playerId: newPlayer.id,
+    });
     io.to(roomCode).emit('players_updated', { players: room.players });
     console.log(`${playerName} joined room ${roomCode}`);
   });
