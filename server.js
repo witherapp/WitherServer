@@ -165,14 +165,22 @@ socket.on('update_name', ({ roomCode, playerId, newName }) => {
   });
 
   // Player disconnects
-  socket.on('disconnect', () => {
+socket.on('disconnect', () => {
     console.log(`Player disconnected: ${socket.id}`);
-    // Clean up empty rooms
     for (const [code, room] of Object.entries(rooms)) {
       if (room.hostId === socket.id) {
-        delete rooms[code];
-        io.to(code).emit('host_left');
-        console.log(`Room ${code} closed — host left`);
+        const roomSockets = io.sockets.adapter.rooms.get(code);
+        if (!roomSockets || roomSockets.size === 0) {
+          delete rooms[code];
+          console.log(`Room ${code} closed — everyone left`);
+        } else {
+          const newHostSocketId = [...roomSockets][0];
+          room.hostId = newHostSocketId;
+          io.to(code).emit('host_migrated', {
+            message: 'The host has left. A new host has been assigned.',
+          });
+          console.log(`Room ${code} — new host assigned: ${newHostSocketId}`);
+        }
       }
     }
   });
