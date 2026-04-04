@@ -117,9 +117,10 @@ io.on('connection', (socket) => {
     console.log(`${playerName} joined room ${roomCode}`);
   });
 
-  const addLog = (room, roomCode, message) => {
+let logCounter = 0;
+const addLog = (room, roomCode, message) => {
     const entry = {
-      id: Date.now(),
+      id: `${Date.now()}_${++logCounter}`,
       message,
       time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
     };
