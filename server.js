@@ -275,7 +275,24 @@ io.on('connection', (socket) => {
     room.players = players;
     socket.to(roomCode).emit('players_updated', { players });
   });
+socket.on('roll_dice', ({ roomCode, playerId, playerName, roll }) => {
+    const room = rooms[roomCode];
+    if (!room) return;
+    if (!room.rolls) room.rolls = {};
+    room.rolls[playerId] = { playerName, roll };
+    addLog(room, roomCode, `${playerName} rolled a ${roll}`);
+    io.to(roomCode).emit('dice_rolled', {
+      rolls: room.rolls,
+      players: room.players,
+    });
+  });
 
+  socket.on('clear_rolls', ({ roomCode }) => {
+    const room = rooms[roomCode];
+    if (!room) return;
+    room.rolls = {};
+    io.to(roomCode).emit('rolls_cleared');
+  });
   socket.on('disconnect', () => {
     console.log(`Player disconnected: ${socket.id}`);
     for (const [code, room] of Object.entries(rooms)) {
