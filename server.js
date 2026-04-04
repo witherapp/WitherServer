@@ -14,7 +14,6 @@ const io = new Server(server, {
   },
 });
 
-// Store active game rooms in memory
 const rooms = {};
 
 app.get('/', (req, res) => {
@@ -31,20 +30,26 @@ app.get('/health', (req, res) => {
 io.on('connection', (socket) => {
   console.log(`Player connected: ${socket.id}`);
 
-  // Host creates a new room
-socket.on('create_room', ({ roomCode, players }) => {
+  socket.on('create_room', ({ roomCode, players }) => {
+    const enrichedPlayers = players.map(p => ({
+      ...p,
+      poison: 0,
+      commanderTax: 0,
+      commanderDamage: {},
+      eliminated: false,
+    }));
     rooms[roomCode] = {
-      players,
+      players: enrichedPlayers,
       hostId: socket.id,
       hostPlayerId: players[0].id,
+      log: [],
     };
     socket.join(roomCode);
-    socket.emit('room_created', { roomCode, players });
+    socket.emit('room_created', { roomCode, players: enrichedPlayers });
     console.log(`Room created: ${roomCode}`);
   });
 
-  // Player joins existing room
-socket.on('join_room', ({ roomCode, playerName, playerId, spectator }) => {
+  socket.on('join_room', ({ roomCode, playerName, playerId, spectator }) => {
     const room = rooms[roomCode];
     if (!room) {
       socket.emit('join_error', { message: 'Room not found. Check your code.' });
@@ -60,32 +65,29 @@ socket.on('join_room', ({ roomCode, playerName, playerId, spectator }) => {
     socket.join(roomCode);
     socket.data.roomCode = roomCode;
 
-// Check if player is rejoining using their stored player ID only
     const existingPlayer = playerId
       ? room.players.find(p => p.id === playerId)
       : null;
 
-if (existingPlayer) {
-  // Rejoin — restore existing player but update name if changed
-  existingPlayer.name = playerName;
-  socket.data.playerId = existingPlayer.id;
-  socket.emit('joined_room', {
-    roomCode,
-    players: room.players,
-    playerId: existingPlayer.id,
-  });
-  io.to(roomCode).emit('players_updated', { players: room.players });
-  console.log(`${playerName} rejoined room ${roomCode}`);
-  return;
-}
-
-    // Spectator join
-    if (spectator) {
-      socket.emit('joined_room', { roomCode, players: room.players });
+    if (existingPlayer) {
+      existingPlayer.name = playerName;
+      socket.data.playerId = existingPlayer.id;
+      socket.emit('joined_room', {
+        roomCode,
+        players: room.players,
+        playerId: existingPlayer.id,
+        log: room.log,
+      });
+      io.to(roomCode).emit('players_updated', { players: room.players });
+      console.log(`${playerName} rejoined room ${roomCode}`);
       return;
     }
 
-    // New player
+    if (spectator) {
+      socket.emit('joined_room', { roomCode, players: room.players, log: room.log });
+      return;
+    }
+
     if (room.players.filter(p => p.name !== 'Spectator').length >= 10) {
       socket.emit('join_error', { message: 'Room is full.' });
       return;
@@ -96,6 +98,10 @@ if (existingPlayer) {
       name: playerName,
       life: 40,
       color: PLAYER_COLORS[room.players.length % PLAYER_COLORS.length],
+      poison: 0,
+      commanderTax: 0,
+      commanderDamage: {},
+      eliminated: false,
     };
 
     room.players.push(newPlayer);
@@ -105,22 +111,117 @@ if (existingPlayer) {
       roomCode,
       players: room.players,
       playerId: newPlayer.id,
+      log: room.log,
     });
     io.to(roomCode).emit('players_updated', { players: room.players });
     console.log(`${playerName} joined room ${roomCode}`);
   });
 
-  // Life total changed
-  socket.on('update_life', ({ roomCode, playerId, newLife }) => {
+  const addLog = (room, roomCode, message) => {
+    const entry = {
+      id: Date.now(),
+      message,
+      time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+    };
+    room.log.unshift(entry);
+    if (room.log.length > 100) room.log.pop();
+    io.to(roomCode).emit('log_updated', { log: room.log });
+  };
+
+  const checkElimination = (room, roomCode, player) => {
+    if (player.eliminated) return;
+
+    // Check life
+    if (player.life <= 0) {
+      player.eliminated = true;
+      addLog(room, roomCode, `${player.name} has been eliminated! (life reached 0)`);
+      io.to(roomCode).emit('players_updated', { players: room.players });
+      return;
+    }
+
+    // Check poison
+    if (player.poison >= 10) {
+      player.eliminated = true;
+      addLog(room, roomCode, `${player.name} has been eliminated! (10 poison counters)`);
+      io.to(roomCode).emit('players_updated', { players: room.players });
+      return;
+    }
+
+    // Check commander damage from each source
+    for (const [sourceId, damage] of Object.entries(player.commanderDamage)) {
+      if (damage >= 21) {
+        player.eliminated = true;
+        addLog(room, roomCode, `${player.name} has been eliminated! (21 commander damage)`);
+        io.to(roomCode).emit('players_updated', { players: room.players });
+        return;
+      }
+    }
+  };
+
+  socket.on('update_life', ({ roomCode, playerId, newLife, changedBy }) => {
     const room = rooms[roomCode];
     if (!room) return;
-    room.players = room.players.map(p =>
-      p.id === playerId ? { ...p, life: newLife } : p
-    );
+    const player = room.players.find(p => p.id === playerId);
+    if (!player) return;
+    const oldLife = player.life;
+    player.life = newLife;
+    const diff = newLife - oldLife;
+    const sign = diff > 0 ? '+' : '';
+    addLog(room, roomCode, `${player.name}: ${oldLife} → ${newLife} (${sign}${diff})`);
+    checkElimination(room, roomCode, player);
     io.to(roomCode).emit('players_updated', { players: room.players });
   });
 
-  // Player added manually by host
+  socket.on('update_poison', ({ roomCode, playerId, amount }) => {
+    const room = rooms[roomCode];
+    if (!room) return;
+    const player = room.players.find(p => p.id === playerId);
+    if (!player) return;
+    player.poison = Math.max(0, player.poison + amount);
+    addLog(room, roomCode, `${player.name}: Poison ${amount > 0 ? '+' : ''}${amount} (total: ${player.poison})`);
+    checkElimination(room, roomCode, player);
+    io.to(roomCode).emit('players_updated', { players: room.players });
+  });
+
+  socket.on('update_commander_tax', ({ roomCode, playerId, amount }) => {
+    const room = rooms[roomCode];
+    if (!room) return;
+    const player = room.players.find(p => p.id === playerId);
+    if (!player) return;
+    player.commanderTax = Math.max(0, player.commanderTax + amount);
+    addLog(room, roomCode, `${player.name}: Commander Tax ${amount > 0 ? '+' : ''}${amount} (total: ${player.commanderTax})`);
+    io.to(roomCode).emit('players_updated', { players: room.players });
+  });
+
+  socket.on('update_commander_damage', ({ roomCode, targetId, sourceId, sourceName, amount }) => {
+    const room = rooms[roomCode];
+    if (!room) return;
+    const target = room.players.find(p => p.id === targetId);
+    if (!target) return;
+    if (!target.commanderDamage) target.commanderDamage = {};
+    const current = target.commanderDamage[sourceId] || 0;
+    const newDamage = Math.max(0, current + amount);
+    target.commanderDamage[sourceId] = newDamage;
+    // Also reduce life total
+    target.life = Math.max(-99, target.life - amount);
+    addLog(room, roomCode, `${target.name} took ${amount} commander damage from ${sourceName} (total: ${newDamage})`);
+    checkElimination(room, roomCode, target);
+    io.to(roomCode).emit('players_updated', { players: room.players });
+  });
+
+  socket.on('revive_player', ({ roomCode, playerId }) => {
+    const room = rooms[roomCode];
+    if (!room) return;
+    const player = room.players.find(p => p.id === playerId);
+    if (!player) return;
+    player.eliminated = false;
+    player.life = 40;
+    player.poison = 0;
+    player.commanderDamage = {};
+    addLog(room, roomCode, `${player.name} has been revived!`);
+    io.to(roomCode).emit('players_updated', { players: room.players });
+  });
+
   socket.on('add_player', ({ roomCode, playerName }) => {
     const room = rooms[roomCode];
     if (!room) return;
@@ -137,30 +238,37 @@ if (existingPlayer) {
       name: playerName,
       life: 40,
       color: PLAYER_COLORS[room.players.length % PLAYER_COLORS.length],
+      poison: 0,
+      commanderTax: 0,
+      commanderDamage: {},
+      eliminated: false,
     };
 
     room.players.push(newPlayer);
+    addLog(room, roomCode, `${playerName} joined the game`);
     io.to(roomCode).emit('players_updated', { players: room.players });
   });
 
-  // Player removed
   socket.on('remove_player', ({ roomCode, playerId }) => {
     const room = rooms[roomCode];
     if (!room) return;
+    const player = room.players.find(p => p.id === playerId);
+    if (player) addLog(room, roomCode, `${player.name} was removed from the game`);
     room.players = room.players.filter(p => p.id !== playerId);
     io.to(roomCode).emit('players_updated', { players: room.players });
   });
-  // Player changes their name
-socket.on('update_name', ({ roomCode, playerId, newName }) => {
-  const room = rooms[roomCode];
-  if (!room) return;
-  room.players = room.players.map(p =>
-    p.id === playerId ? { ...p, name: newName } : p
-  );
-  io.to(roomCode).emit('players_updated', { players: room.players });
-});
 
-  // Full game state sync
+  socket.on('update_name', ({ roomCode, playerId, newName }) => {
+    const room = rooms[roomCode];
+    if (!room) return;
+    const player = room.players.find(p => p.id === playerId);
+    if (!player) return;
+    const oldName = player.name;
+    player.name = newName;
+    addLog(room, roomCode, `${oldName} changed their name to ${newName}`);
+    io.to(roomCode).emit('players_updated', { players: room.players });
+  });
+
   socket.on('sync_state', ({ roomCode, players }) => {
     const room = rooms[roomCode];
     if (!room) return;
@@ -168,8 +276,7 @@ socket.on('update_name', ({ roomCode, playerId, newName }) => {
     socket.to(roomCode).emit('players_updated', { players });
   });
 
-  // Player disconnects
-socket.on('disconnect', () => {
+  socket.on('disconnect', () => {
     console.log(`Player disconnected: ${socket.id}`);
     for (const [code, room] of Object.entries(rooms)) {
       if (room.hostId === socket.id) {
