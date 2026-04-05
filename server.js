@@ -542,6 +542,12 @@ io.on('connection', (socket) => {
     room.players = players;
     socket.to(roomCode).emit('players_updated', { players });
   });
+  socket.on('start_game_now', ({ roomCode }) => {
+    const room = rooms[roomCode];
+    if (!room) return;
+    addLog(room, roomCode, 'The game has begun!');
+    io.to(roomCode).emit('navigate_to_game');
+  });
 
   socket.on('disconnect', () => {
     console.log(`Player disconnected: ${socket.id}`);
