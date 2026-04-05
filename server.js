@@ -326,6 +326,14 @@ socket.on('roll_dice', ({ roomCode, playerId, playerName, roll }) => {
     if (!room) return;
     socket.emit('log_updated', { log: room.log });
   });
+  socket.on('spin_wheel', ({ roomCode, winnerId }) => {
+    const room = rooms[roomCode];
+    if (!room) return;
+    const winner = room.players.find(p => p.id === winnerId);
+    if (!winner) return;
+    addLog(room, roomCode, `The Wither Wheel chose ${winner.name} to go first!`);
+    io.to(roomCode).emit('wheel_result', { winnerId, winnerName: winner.name });
+  });
 });
 
 const PORT = process.env.PORT || 3000;
