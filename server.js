@@ -242,6 +242,7 @@ io.on('connection', (socket) => {
       commanderTax: 0,
       commanderDamage: {},
       eliminated: false,
+      manual: true,
     };
 
     room.players.push(newPlayer);
@@ -300,7 +301,7 @@ socket.on('roll_dice', ({ roomCode, playerId, playerName, roll }) => {
     addLog(room, roomCode, 'The game is starting!');
     socket.to(roomCode).emit('game_starting', { players: room.players, roomCode });
   });
-  
+
   socket.on('disconnect', () => {
     console.log(`Player disconnected: ${socket.id}`);
     for (const [code, room] of Object.entries(rooms)) {
