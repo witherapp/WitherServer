@@ -350,7 +350,30 @@ socket.on('roll_dice', ({ roomCode, playerId, playerName, roll }) => {
       rotation,
     });
   });
+socket.on('rps_pick', ({ roomCode, playerId, playerName, pick, matchId }) => {
+    const room = rooms[roomCode];
+    if (!room) return;
+    if (!room.rps) room.rps = { picks: {}, matchId: null };
+    room.rps.picks[playerId] = { playerName, pick, matchId };
+    io.to(roomCode).emit('rps_updated', { picks: room.rps.picks });
+  });
 
+  socket.on('rps_start_match', ({ roomCode, matchId, player1, player2 }) => {
+    const room = rooms[roomCode];
+    if (!room) return;
+    if (!room.rps) room.rps = { picks: {} };
+    room.rps.matchId = matchId;
+    room.rps.picks = {};
+    addLog(room, roomCode, `RPS: ${player1.name} vs ${player2.name}`);
+    io.to(roomCode).emit('rps_match_started', { matchId, player1, player2 });
+  });
+
+  socket.on('rps_clear', ({ roomCode }) => {
+    const room = rooms[roomCode];
+    if (!room) return;
+    room.rps = { picks: {}, matchId: null };
+    io.to(roomCode).emit('rps_cleared');
+  });
 });
 
 const PORT = process.env.PORT || 3000;
