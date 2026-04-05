@@ -548,6 +548,12 @@ io.on('connection', (socket) => {
     addLog(room, roomCode, 'The game has begun!');
     io.to(roomCode).emit('navigate_to_game');
   });
+  
+  socket.on('select_minigame', ({ roomCode, option }) => {
+    const room = rooms[roomCode];
+    if (!room) return;
+    io.to(roomCode).emit('minigame_selected', { option });
+  });
 
   socket.on('disconnect', () => {
     console.log(`Player disconnected: ${socket.id}`);
