@@ -393,6 +393,11 @@ socket.on('rps_pick', ({ roomCode, playerId, playerName, pick, matchId }) => {
     addLog(room, roomCode, `${champion.name} won Rock Paper Scissors and goes first!`);
     io.to(roomCode).emit('rps_champion', { champion });
   });
+  socket.on('navigate_rps', ({ roomCode }) => {
+    const room = rooms[roomCode];
+    if (!room) return;
+    socket.to(roomCode).emit('go_to_rps');
+  });
 });
 
 const PORT = process.env.PORT || 3000;
