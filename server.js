@@ -374,6 +374,25 @@ socket.on('rps_pick', ({ roomCode, playerId, playerName, pick, matchId }) => {
     room.rps = { picks: {}, matchId: null };
     io.to(roomCode).emit('rps_cleared');
   });
+  socket.on('rps_bracket_sync', ({ roomCode, bracket }) => {
+    const room = rooms[roomCode];
+    if (!room) return;
+    socket.to(roomCode).emit('rps_bracket_synced', { bracket });
+  });
+
+  socket.on('rps_reveal_sync', ({ roomCode, pick1, pick2, winner, player1, player2, matchIndex }) => {
+    const room = rooms[roomCode];
+    if (!room) return;
+    addLog(room, roomCode, `RPS: ${player1.name} (${pick1.pick}) vs ${player2.name} (${pick2.pick}) — ${winner ? winner.name + ' wins!' : 'Tie!'}`);
+    io.to(roomCode).emit('rps_reveal', { pick1, pick2, winner, player1, player2, matchIndex });
+  });
+
+  socket.on('rps_champion_sync', ({ roomCode, champion }) => {
+    const room = rooms[roomCode];
+    if (!room) return;
+    addLog(room, roomCode, `${champion.name} won Rock Paper Scissors and goes first!`);
+    io.to(roomCode).emit('rps_champion', { champion });
+  });
 });
 
 const PORT = process.env.PORT || 3000;
