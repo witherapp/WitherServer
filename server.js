@@ -89,6 +89,75 @@ const buildBracket = (players) => {
   return matches;
 };
 
+const triggerCountdownAndReveal = (roomCode, match, p1picked, p2picked) => {
+  const room = rooms[roomCode];
+  if (!room) return;
+
+  io.to(roomCode).emit('rps_countdown', { seconds: 3 });
+  setTimeout(() => io.to(roomCode).emit('rps_countdown', { seconds: 2 }), 1000);
+  setTimeout(() => io.to(roomCode).emit('rps_countdown', { seconds: 1 }), 2000);
+
+  setTimeout(() => {
+    if (!rooms[roomCode]) return;
+    const winner = getMatchWinner(
+      { player: match.player1, pick: p1picked.pick },
+      { player: match.player2, pick: p2picked.pick }
+    );
+
+    addLog(room, roomCode,
+      `RPS: ${match.player1.name} threw ${p1picked.pick} vs ${match.player2.name} threw ${p2picked.pick} — ${winner ? winner.name + ' wins!' : 'Tie!'}`
+    );
+
+    io.to(roomCode).emit('rps_reveal', {
+      player1: match.player1,
+      player2: match.player2,
+      pick1: p1picked.pick,
+      pick2: p2picked.pick,
+      winner,
+      isTie: !winner,
+    });
+
+    if (winner) {
+      room.rps.roundWinners.push(winner);
+      room.rps.matchTieCount = 0;
+      room.rps.currentMatchIndex++;
+      setTimeout(() => runNextMatch(roomCode), 5000);
+    } else {
+      room.rps.matchTieCount++;
+      room.rps.picks = {};
+      setTimeout(() => {
+        if (!rooms[roomCode]) return;
+        io.to(roomCode).emit('rps_state', {
+          bracket: room.rps.bracket,
+          currentMatchIndex: room.rps.currentMatchIndex,
+          phase: 'picking',
+          match,
+          roundWinners: room.rps.roundWinners,
+          isTie: true,
+        });
+        // Re-auto-pick for manual players on rematch
+        const CHOICES = ['rock', 'paper', 'scissors'];
+        [match.player1, match.player2].forEach(player => {
+          if (player && player.manual) {
+            const autoPick = CHOICES[Math.floor(Math.random() * 3)];
+            setTimeout(() => {
+              if (!rooms[roomCode]?.rps) return;
+              room.rps.picks[player.id] = { playerId: player.id, pick: autoPick };
+              io.to(roomCode).emit('rps_pick_received', {
+                playerId: player.id,
+                playerName: player.name,
+              });
+              const p1 = room.rps.picks[match.player1.id];
+              const p2 = room.rps.picks[match.player2.id];
+              if (p1 && p2) triggerCountdownAndReveal(roomCode, match, p1, p2);
+            }, 800 + Math.random() * 800);
+          }
+        });
+      }, 5000);
+    }
+  }, 3000);
+};
+
 const runNextMatch = (roomCode) => {
   const room = rooms[roomCode];
   if (!room || !room.rps) return;
@@ -96,14 +165,12 @@ const runNextMatch = (roomCode) => {
   const { bracket, currentMatchIndex } = room.rps;
 
   if (currentMatchIndex >= bracket.length) {
-    // Round complete — check if we have a champion
     const winners = room.rps.roundWinners;
     if (winners.length === 1) {
       addLog(room, roomCode, `${winners[0].name} won Rock Paper Scissors!`);
       io.to(roomCode).emit('rps_champion', { champion: winners[0] });
       return;
     }
-    // Build next round
     const nextBracket = buildBracket(winners);
     room.rps.bracket = nextBracket;
     room.rps.currentMatchIndex = 0;
@@ -122,7 +189,6 @@ const runNextMatch = (roomCode) => {
   const match = bracket[currentMatchIndex];
 
   if (match.bye) {
-    // Auto advance bye player
     room.rps.roundWinners.push(match.player1);
     addLog(room, roomCode, `${match.player1.name} gets a bye and advances!`);
     io.to(roomCode).emit('rps_state', {
@@ -139,7 +205,7 @@ const runNextMatch = (roomCode) => {
 
   // Start the match
   room.rps.picks = {};
-  room.rps.matchTieCount = (room.rps.matchTieCount || 0);
+  room.rps.matchTieCount = 0;
   io.to(roomCode).emit('rps_state', {
     bracket,
     currentMatchIndex,
@@ -148,6 +214,27 @@ const runNextMatch = (roomCode) => {
     roundWinners: room.rps.roundWinners,
   });
   addLog(room, roomCode, `RPS Match: ${match.player1.name} vs ${match.player2.name}`);
+
+  // Auto pick for manual players
+  const CHOICES = ['rock', 'paper', 'scissors'];
+  [match.player1, match.player2].forEach(player => {
+    if (player && player.manual) {
+      const autoPick = CHOICES[Math.floor(Math.random() * 3)];
+      setTimeout(() => {
+        if (!rooms[roomCode]?.rps) return;
+        room.rps.picks[player.id] = { playerId: player.id, pick: autoPick };
+        io.to(roomCode).emit('rps_pick_received', {
+          playerId: player.id,
+          playerName: player.name,
+        });
+        const p1picked = room.rps.picks[match.player1.id];
+        const p2picked = room.rps.picks[match.player2.id];
+        if (p1picked && p2picked) {
+          triggerCountdownAndReveal(roomCode, match, p1picked, p2picked);
+        }
+      }, 800 + Math.random() * 800);
+    }
+  });
 };
 
 app.get('/', (req, res) => res.send('Wither Sync Server is running.'));
@@ -375,7 +462,6 @@ io.on('connection', (socket) => {
     socket.to(roomCode).emit('go_to_rps');
   });
 
-  // RPS — server controlled tournament
   socket.on('rps_start_tournament', ({ roomCode }) => {
     const room = rooms[roomCode];
     if (!room) return;
@@ -406,9 +492,10 @@ io.on('connection', (socket) => {
     const match = bracket[currentMatchIndex];
     if (!match || match.bye) return;
 
-    // Only accept picks from players in the current match
     const inMatch = match.player1?.id === playerId || match.player2?.id === playerId;
     if (!inMatch) return;
+
+    if (room.rps.picks[playerId]) return;
 
     room.rps.picks[playerId] = { playerId, pick };
 
@@ -418,61 +505,11 @@ io.on('connection', (socket) => {
       playerName: player?.name || 'Unknown',
     });
 
-    // Check if both players have picked
     const p1picked = room.rps.picks[match.player1.id];
     const p2picked = room.rps.picks[match.player2.id];
 
     if (p1picked && p2picked) {
-      // Countdown then reveal
-      io.to(roomCode).emit('rps_countdown', { seconds: 3 });
-
-      setTimeout(() => {
-        io.to(roomCode).emit('rps_countdown', { seconds: 2 });
-      }, 1000);
-      setTimeout(() => {
-        io.to(roomCode).emit('rps_countdown', { seconds: 1 });
-      }, 2000);
-      setTimeout(() => {
-        const winner = getMatchWinner(
-          { player: match.player1, pick: p1picked.pick },
-          { player: match.player2, pick: p2picked.pick }
-        );
-
-        addLog(room, roomCode,
-          `RPS: ${match.player1.name} threw ${p1picked.pick} vs ${match.player2.name} threw ${p2picked.pick} — ${winner ? winner.name + ' wins!' : 'Tie!'}`
-        );
-
-        io.to(roomCode).emit('rps_reveal', {
-          player1: match.player1,
-          player2: match.player2,
-          pick1: p1picked.pick,
-          pick2: p2picked.pick,
-          winner,
-          isTie: !winner,
-        });
-
-        if (winner) {
-          room.rps.roundWinners.push(winner);
-          room.rps.matchTieCount = 0;
-          room.rps.currentMatchIndex++;
-          // Auto advance after 5 seconds
-          setTimeout(() => runNextMatch(roomCode), 5000);
-        } else {
-          // Tie — rematch same players
-          room.rps.matchTieCount++;
-          room.rps.picks = {};
-          setTimeout(() => {
-            io.to(roomCode).emit('rps_state', {
-              bracket,
-              currentMatchIndex,
-              phase: 'picking',
-              match,
-              roundWinners: room.rps.roundWinners,
-              isTie: true,
-            });
-          }, 5000);
-        }
-      }, 3000);
+      triggerCountdownAndReveal(roomCode, match, p1picked, p2picked);
     }
   });
 
