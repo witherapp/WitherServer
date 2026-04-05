@@ -8,30 +8,156 @@ app.use(cors());
 
 const server = http.createServer(app);
 const io = new Server(server, {
-  cors: {
-    origin: '*',
-    methods: ['GET', 'POST'],
-  },
+  cors: { origin: '*', methods: ['GET', 'POST'] },
 });
 
 const rooms = {};
+let logCounter = 0;
 
-app.get('/', (req, res) => {
-  res.send('Wither Sync Server is running.');
-});
+const addLog = (room, roomCode, message) => {
+  const entry = {
+    id: `${Date.now()}_${++logCounter}`,
+    message,
+    time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+  };
+  room.log.unshift(entry);
+  if (room.log.length > 100) room.log.pop();
+  io.to(roomCode).emit('log_updated', { log: room.log });
+};
 
-app.get('/health', (req, res) => {
-  res.json({
-    status: 'ok',
-    activeRooms: Object.keys(rooms).length,
+const checkElimination = (room, roomCode, player) => {
+  if (player.eliminated) return;
+  if (player.life <= 0) {
+    player.eliminated = true;
+    addLog(room, roomCode, `${player.name} has been eliminated! (life reached 0)`);
+    io.to(roomCode).emit('players_updated', { players: room.players });
+    return;
+  }
+  if (player.poison >= 10) {
+    player.eliminated = true;
+    addLog(room, roomCode, `${player.name} has been eliminated! (10 poison counters)`);
+    io.to(roomCode).emit('players_updated', { players: room.players });
+    return;
+  }
+  for (const [sourceId, damage] of Object.entries(player.commanderDamage || {})) {
+    if (damage >= 21) {
+      player.eliminated = true;
+      addLog(room, roomCode, `${player.name} has been eliminated! (21 commander damage)`);
+      io.to(roomCode).emit('players_updated', { players: room.players });
+      return;
+    }
+  }
+};
+
+const beats = { rock: 'scissors', scissors: 'paper', paper: 'rock' };
+
+const getMatchWinner = (p1, p2) => {
+  if (p1.pick === p2.pick) return null;
+  if (beats[p1.pick] === p2.pick) return p1.player;
+  return p2.player;
+};
+
+const shuffleArray = (arr) => {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+};
+
+const buildBracket = (players) => {
+  const shuffled = shuffleArray(players);
+  const matches = [];
+  for (let i = 0; i < shuffled.length; i += 2) {
+    if (i + 1 < shuffled.length) {
+      matches.push({
+        id: `match_${Date.now()}_${i}`,
+        player1: shuffled[i],
+        player2: shuffled[i + 1],
+        bye: false,
+      });
+    } else {
+      matches.push({
+        id: `match_${Date.now()}_${i}`,
+        player1: shuffled[i],
+        player2: null,
+        bye: true,
+      });
+    }
+  }
+  return matches;
+};
+
+const runNextMatch = (roomCode) => {
+  const room = rooms[roomCode];
+  if (!room || !room.rps) return;
+
+  const { bracket, currentMatchIndex } = room.rps;
+
+  if (currentMatchIndex >= bracket.length) {
+    // Round complete — check if we have a champion
+    const winners = room.rps.roundWinners;
+    if (winners.length === 1) {
+      addLog(room, roomCode, `${winners[0].name} won Rock Paper Scissors!`);
+      io.to(roomCode).emit('rps_champion', { champion: winners[0] });
+      return;
+    }
+    // Build next round
+    const nextBracket = buildBracket(winners);
+    room.rps.bracket = nextBracket;
+    room.rps.currentMatchIndex = 0;
+    room.rps.roundWinners = [];
+    room.rps.picks = {};
+    io.to(roomCode).emit('rps_state', {
+      bracket: nextBracket,
+      currentMatchIndex: 0,
+      phase: 'bracket',
+      roundWinners: [],
+    });
+    setTimeout(() => runNextMatch(roomCode), 2000);
+    return;
+  }
+
+  const match = bracket[currentMatchIndex];
+
+  if (match.bye) {
+    // Auto advance bye player
+    room.rps.roundWinners.push(match.player1);
+    addLog(room, roomCode, `${match.player1.name} gets a bye and advances!`);
+    io.to(roomCode).emit('rps_state', {
+      bracket,
+      currentMatchIndex,
+      phase: 'bye',
+      byePlayer: match.player1,
+      roundWinners: room.rps.roundWinners,
+    });
+    room.rps.currentMatchIndex++;
+    setTimeout(() => runNextMatch(roomCode), 2500);
+    return;
+  }
+
+  // Start the match
+  room.rps.picks = {};
+  room.rps.matchTieCount = (room.rps.matchTieCount || 0);
+  io.to(roomCode).emit('rps_state', {
+    bracket,
+    currentMatchIndex,
+    phase: 'picking',
+    match,
+    roundWinners: room.rps.roundWinners,
   });
-});
+  addLog(room, roomCode, `RPS Match: ${match.player1.name} vs ${match.player2.name}`);
+};
+
+app.get('/', (req, res) => res.send('Wither Sync Server is running.'));
+app.get('/health', (req, res) => res.json({ status: 'ok', activeRooms: Object.keys(rooms).length }));
 
 io.on('connection', (socket) => {
   console.log(`Player connected: ${socket.id}`);
 
   socket.on('create_room', ({ roomCode, players }) => {
-    const enrichedPlayers = players.map(p => ({
+    const enriched = players.map(p => ({
       ...p,
       poison: 0,
       commanderTax: 0,
@@ -39,13 +165,13 @@ io.on('connection', (socket) => {
       eliminated: false,
     }));
     rooms[roomCode] = {
-      players: enrichedPlayers,
+      players: enriched,
       hostId: socket.id,
       hostPlayerId: players[0].id,
       log: [],
     };
     socket.join(roomCode);
-    socket.emit('room_created', { roomCode, players: enrichedPlayers });
+    socket.emit('room_created', { roomCode, players: enriched });
     console.log(`Room created: ${roomCode}`);
   });
 
@@ -79,7 +205,6 @@ io.on('connection', (socket) => {
         log: room.log,
       });
       io.to(roomCode).emit('players_updated', { players: room.players });
-      console.log(`${playerName} rejoined room ${roomCode}`);
       return;
     }
 
@@ -106,7 +231,6 @@ io.on('connection', (socket) => {
 
     room.players.push(newPlayer);
     socket.data.playerId = newPlayer.id;
-
     socket.emit('joined_room', {
       roomCode,
       players: room.players,
@@ -114,51 +238,9 @@ io.on('connection', (socket) => {
       log: room.log,
     });
     io.to(roomCode).emit('players_updated', { players: room.players });
-    console.log(`${playerName} joined room ${roomCode}`);
   });
 
-  const addLog = (room, roomCode, message) => {
-    const entry = {
-      id: Date.now(),
-      message,
-      time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-    };
-    room.log.unshift(entry);
-    if (room.log.length > 100) room.log.pop();
-    io.to(roomCode).emit('log_updated', { log: room.log });
-  };
-
-  const checkElimination = (room, roomCode, player) => {
-    if (player.eliminated) return;
-
-    // Check life
-    if (player.life <= 0) {
-      player.eliminated = true;
-      addLog(room, roomCode, `${player.name} has been eliminated! (life reached 0)`);
-      io.to(roomCode).emit('players_updated', { players: room.players });
-      return;
-    }
-
-    // Check poison
-    if (player.poison >= 10) {
-      player.eliminated = true;
-      addLog(room, roomCode, `${player.name} has been eliminated! (10 poison counters)`);
-      io.to(roomCode).emit('players_updated', { players: room.players });
-      return;
-    }
-
-    // Check commander damage from each source
-    for (const [sourceId, damage] of Object.entries(player.commanderDamage)) {
-      if (damage >= 21) {
-        player.eliminated = true;
-        addLog(room, roomCode, `${player.name} has been eliminated! (21 commander damage)`);
-        io.to(roomCode).emit('players_updated', { players: room.players });
-        return;
-      }
-    }
-  };
-
-  socket.on('update_life', ({ roomCode, playerId, newLife, changedBy }) => {
+  socket.on('update_life', ({ roomCode, playerId, newLife }) => {
     const room = rooms[roomCode];
     if (!room) return;
     const player = room.players.find(p => p.id === playerId);
@@ -202,7 +284,6 @@ io.on('connection', (socket) => {
     const current = target.commanderDamage[sourceId] || 0;
     const newDamage = Math.max(0, current + amount);
     target.commanderDamage[sourceId] = newDamage;
-    // Also reduce life total
     target.life = Math.max(-99, target.life - amount);
     addLog(room, roomCode, `${target.name} took ${amount} commander damage from ${sourceName} (total: ${newDamage})`);
     checkElimination(room, roomCode, target);
@@ -226,13 +307,11 @@ io.on('connection', (socket) => {
     const room = rooms[roomCode];
     if (!room) return;
     if (room.players.length >= 10) return;
-
     const PLAYER_COLORS = [
       '#39ff14', '#7b2fbe', '#ff4444', '#4488ff',
       '#ff9900', '#ff44cc', '#00cccc', '#ffff00',
       '#ff6644', '#44ff88',
     ];
-
     const newPlayer = {
       id: Date.now(),
       name: playerName,
@@ -244,7 +323,6 @@ io.on('connection', (socket) => {
       eliminated: false,
       manual: true,
     };
-
     room.players.push(newPlayer);
     addLog(room, roomCode, `${playerName} joined the game`);
     io.to(roomCode).emit('players_updated', { players: room.players });
@@ -270,22 +348,141 @@ io.on('connection', (socket) => {
     io.to(roomCode).emit('players_updated', { players: room.players });
   });
 
-  socket.on('sync_state', ({ roomCode, players }) => {
+  socket.on('request_log', ({ roomCode }) => {
     const room = rooms[roomCode];
     if (!room) return;
-    room.players = players;
-    socket.to(roomCode).emit('players_updated', { players });
+    socket.emit('log_updated', { log: room.log });
   });
-socket.on('roll_dice', ({ roomCode, playerId, playerName, roll }) => {
+
+  socket.on('navigate_wheel', ({ roomCode }) => {
+    const room = rooms[roomCode];
+    if (!room) return;
+    socket.to(roomCode).emit('go_to_wheel');
+  });
+
+  socket.on('spin_wheel', ({ roomCode, rotation, winnerId }) => {
+    const room = rooms[roomCode];
+    if (!room) return;
+    const winner = room.players.find(p => p.id === winnerId);
+    if (!winner) return;
+    addLog(room, roomCode, `The Wither Wheel chose ${winner.name} to go first!`);
+    io.to(roomCode).emit('wheel_result', { winnerId, winnerName: winner.name, rotation });
+  });
+
+  socket.on('navigate_rps', ({ roomCode }) => {
+    const room = rooms[roomCode];
+    if (!room) return;
+    socket.to(roomCode).emit('go_to_rps');
+  });
+
+  // RPS — server controlled tournament
+  socket.on('rps_start_tournament', ({ roomCode }) => {
+    const room = rooms[roomCode];
+    if (!room) return;
+    const eligible = room.players.filter(p => p.name !== 'Spectator');
+    const bracket = buildBracket(eligible);
+    room.rps = {
+      bracket,
+      currentMatchIndex: 0,
+      roundWinners: [],
+      picks: {},
+      matchTieCount: 0,
+    };
+    addLog(room, roomCode, 'Rock Paper Scissors tournament started!');
+    io.to(roomCode).emit('rps_state', {
+      bracket,
+      currentMatchIndex: 0,
+      phase: 'bracket',
+      roundWinners: [],
+    });
+    setTimeout(() => runNextMatch(roomCode), 2000);
+  });
+
+  socket.on('rps_pick', ({ roomCode, playerId, pick }) => {
+    const room = rooms[roomCode];
+    if (!room || !room.rps) return;
+
+    const { bracket, currentMatchIndex } = room.rps;
+    const match = bracket[currentMatchIndex];
+    if (!match || match.bye) return;
+
+    // Only accept picks from players in the current match
+    const inMatch = match.player1?.id === playerId || match.player2?.id === playerId;
+    if (!inMatch) return;
+
+    room.rps.picks[playerId] = { playerId, pick };
+
+    const player = room.players.find(p => p.id === playerId);
+    io.to(roomCode).emit('rps_pick_received', {
+      playerId,
+      playerName: player?.name || 'Unknown',
+    });
+
+    // Check if both players have picked
+    const p1picked = room.rps.picks[match.player1.id];
+    const p2picked = room.rps.picks[match.player2.id];
+
+    if (p1picked && p2picked) {
+      // Countdown then reveal
+      io.to(roomCode).emit('rps_countdown', { seconds: 3 });
+
+      setTimeout(() => {
+        io.to(roomCode).emit('rps_countdown', { seconds: 2 });
+      }, 1000);
+      setTimeout(() => {
+        io.to(roomCode).emit('rps_countdown', { seconds: 1 });
+      }, 2000);
+      setTimeout(() => {
+        const winner = getMatchWinner(
+          { player: match.player1, pick: p1picked.pick },
+          { player: match.player2, pick: p2picked.pick }
+        );
+
+        addLog(room, roomCode,
+          `RPS: ${match.player1.name} threw ${p1picked.pick} vs ${match.player2.name} threw ${p2picked.pick} — ${winner ? winner.name + ' wins!' : 'Tie!'}`
+        );
+
+        io.to(roomCode).emit('rps_reveal', {
+          player1: match.player1,
+          player2: match.player2,
+          pick1: p1picked.pick,
+          pick2: p2picked.pick,
+          winner,
+          isTie: !winner,
+        });
+
+        if (winner) {
+          room.rps.roundWinners.push(winner);
+          room.rps.matchTieCount = 0;
+          room.rps.currentMatchIndex++;
+          // Auto advance after 5 seconds
+          setTimeout(() => runNextMatch(roomCode), 5000);
+        } else {
+          // Tie — rematch same players
+          room.rps.matchTieCount++;
+          room.rps.picks = {};
+          setTimeout(() => {
+            io.to(roomCode).emit('rps_state', {
+              bracket,
+              currentMatchIndex,
+              phase: 'picking',
+              match,
+              roundWinners: room.rps.roundWinners,
+              isTie: true,
+            });
+          }, 5000);
+        }
+      }, 3000);
+    }
+  });
+
+  socket.on('roll_dice', ({ roomCode, playerId, playerName, roll }) => {
     const room = rooms[roomCode];
     if (!room) return;
     if (!room.rolls) room.rolls = {};
     room.rolls[playerId] = { playerName, roll };
     addLog(room, roomCode, `${playerName} rolled a ${roll}`);
-    io.to(roomCode).emit('dice_rolled', {
-      rolls: room.rolls,
-      players: room.players,
-    });
+    io.to(roomCode).emit('dice_rolled', { rolls: room.rolls });
   });
 
   socket.on('clear_rolls', ({ roomCode }) => {
@@ -302,6 +499,13 @@ socket.on('roll_dice', ({ roomCode, playerId, playerName, roll }) => {
     socket.to(roomCode).emit('game_starting', { players: room.players, roomCode });
   });
 
+  socket.on('sync_state', ({ roomCode, players }) => {
+    const room = rooms[roomCode];
+    if (!room) return;
+    room.players = players;
+    socket.to(roomCode).emit('players_updated', { players });
+  });
+
   socket.on('disconnect', () => {
     console.log(`Player disconnected: ${socket.id}`);
     for (const [code, room] of Object.entries(rooms)) {
@@ -316,87 +520,9 @@ socket.on('roll_dice', ({ roomCode, playerId, playerName, roll }) => {
           io.to(code).emit('host_migrated', {
             message: 'The host has left. A new host has been assigned.',
           });
-          console.log(`Room ${code} — new host assigned: ${newHostSocketId}`);
         }
       }
     }
-  });
-  socket.on('request_log', ({ roomCode }) => {
-    const room = rooms[roomCode];
-    if (!room) return;
-    socket.emit('log_updated', { log: room.log });
-  });
-  socket.on('navigate_wheel', ({ roomCode }) => {
-    const room = rooms[roomCode];
-    if (!room) return;
-    socket.to(roomCode).emit('go_to_wheel');
-  });
-
-  socket.on('navigate_wheel', ({ roomCode }) => {
-    const room = rooms[roomCode];
-    if (!room) return;
-    socket.to(roomCode).emit('go_to_wheel');
-  });
-
-  socket.on('spin_wheel', ({ roomCode, rotation, winnerId }) => {
-    const room = rooms[roomCode];
-    if (!room) return;
-    const winner = room.players.find(p => p.id === winnerId);
-    if (!winner) return;
-    addLog(room, roomCode, `The Wither Wheel chose ${winner.name} to go first!`);
-    io.to(roomCode).emit('wheel_result', {
-      winnerId,
-      winnerName: winner.name,
-      rotation,
-    });
-  });
-socket.on('rps_pick', ({ roomCode, playerId, playerName, pick, matchId }) => {
-    const room = rooms[roomCode];
-    if (!room) return;
-    if (!room.rps) room.rps = { picks: {}, matchId: null };
-    room.rps.picks[playerId] = { playerName, pick, matchId };
-    io.to(roomCode).emit('rps_updated', { picks: room.rps.picks });
-  });
-
-  socket.on('rps_start_match', ({ roomCode, matchId, player1, player2 }) => {
-    const room = rooms[roomCode];
-    if (!room) return;
-    if (!room.rps) room.rps = { picks: {} };
-    room.rps.matchId = matchId;
-    room.rps.picks = {};
-    addLog(room, roomCode, `RPS: ${player1.name} vs ${player2.name}`);
-    io.to(roomCode).emit('rps_match_started', { matchId, player1, player2 });
-  });
-
-  socket.on('rps_clear', ({ roomCode }) => {
-    const room = rooms[roomCode];
-    if (!room) return;
-    room.rps = { picks: {}, matchId: null };
-    io.to(roomCode).emit('rps_cleared');
-  });
-  socket.on('rps_bracket_sync', ({ roomCode, bracket }) => {
-    const room = rooms[roomCode];
-    if (!room) return;
-    socket.to(roomCode).emit('rps_bracket_synced', { bracket });
-  });
-
-  socket.on('rps_reveal_sync', ({ roomCode, pick1, pick2, winner, player1, player2, matchIndex }) => {
-    const room = rooms[roomCode];
-    if (!room) return;
-    addLog(room, roomCode, `RPS: ${player1.name} (${pick1.pick}) vs ${player2.name} (${pick2.pick}) — ${winner ? winner.name + ' wins!' : 'Tie!'}`);
-    io.to(roomCode).emit('rps_reveal', { pick1, pick2, winner, player1, player2, matchIndex });
-  });
-
-  socket.on('rps_champion_sync', ({ roomCode, champion }) => {
-    const room = rooms[roomCode];
-    if (!room) return;
-    addLog(room, roomCode, `${champion.name} won Rock Paper Scissors and goes first!`);
-    io.to(roomCode).emit('rps_champion', { champion });
-  });
-  socket.on('navigate_rps', ({ roomCode }) => {
-    const room = rooms[roomCode];
-    if (!room) return;
-    socket.to(roomCode).emit('go_to_rps');
   });
 });
 
