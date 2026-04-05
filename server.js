@@ -326,14 +326,31 @@ socket.on('roll_dice', ({ roomCode, playerId, playerName, roll }) => {
     if (!room) return;
     socket.emit('log_updated', { log: room.log });
   });
-  socket.on('spin_wheel', ({ roomCode, winnerId }) => {
+  socket.on('navigate_wheel', ({ roomCode }) => {
+    const room = rooms[roomCode];
+    if (!room) return;
+    socket.to(roomCode).emit('go_to_wheel');
+  });
+
+  socket.on('navigate_wheel', ({ roomCode }) => {
+    const room = rooms[roomCode];
+    if (!room) return;
+    socket.to(roomCode).emit('go_to_wheel');
+  });
+
+  socket.on('spin_wheel', ({ roomCode, rotation, winnerId }) => {
     const room = rooms[roomCode];
     if (!room) return;
     const winner = room.players.find(p => p.id === winnerId);
     if (!winner) return;
     addLog(room, roomCode, `The Wither Wheel chose ${winner.name} to go first!`);
-    io.to(roomCode).emit('wheel_result', { winnerId, winnerName: winner.name });
+    io.to(roomCode).emit('wheel_result', {
+      winnerId,
+      winnerName: winner.name,
+      rotation,
+    });
   });
+
 });
 
 const PORT = process.env.PORT || 3000;
